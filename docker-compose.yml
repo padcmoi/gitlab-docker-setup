@@ -2,6 +2,7 @@ services:
   gitlab:
     container_name: "${GITLAB_CONTAINER_NAME}"
     image: "gitlab/gitlab-ce:latest"
+    restart: on-failure
     hostname: "${GITLAB_HOST}"
     environment:
       GITLAB_ROOT_EMAIL: "${GITLAB_ROOT_EMAIL}"
@@ -38,7 +39,7 @@ services:
         logrotate['rotate'] = 7
         logrotate['size'] = '100M'
     ports:
-      - "${HTTP_PORT}:80"
+      - "127.0.0.1:${HTTP_PORT}:80"
       - "${SSH_PORT}:22"
     volumes:
       - "./config:/etc/gitlab"
@@ -49,3 +50,48 @@ services:
       options:
         max-size: "50M"
         max-file: "3"
+
+  gitlab-runner:
+    container_name: "${GITLAB_CONTAINER_NAME}_runner"
+    image: "gitlab/gitlab-runner:latest"
+    restart: unless-stopped
+    depends_on:
+      - gitlab
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - gitlab-runner-config:/etc/gitlab-runner
+    environment:
+      CI_SERVER_URL: "http://gitlab"
+      REGISTRATION_TOKEN: "${RUNNER_REGISTRATION_TOKEN}"
+      RUNNER_NAME: "${GITLAB_CONTAINER_NAME}_runner"
+      RUNNER_EXECUTOR: "docker"
+      DOCKER_IMAGE: "docker:24"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        if [ ! -s /etc/gitlab-runner/config.toml ]; then
+          echo "[INIT] no config.toml found, registering runner..."
+          gitlab-runner register \
+            --non-interactive \
+            --url "$$CI_SERVER_URL" \
+            --token "$$REGISTRATION_TOKEN" \
+            --name "$$RUNNER_NAME" \
+            --executor "$$RUNNER_EXECUTOR" \
+            --docker-image "$$DOCKER_IMAGE" \
+            --docker-privileged \
+            --docker-volumes "/var/run/docker.sock:/var/run/docker.sock"
+        else
+          echo "[INIT] existing config.toml found, skipping registration"
+        fi
+        exec /entrypoint run --user=gitlab-runner --working-directory=/home/gitlab-runner
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20M"
+        max-file: "3"
+
+volumes:
+  gitlab-runner-config:
+    external: true
