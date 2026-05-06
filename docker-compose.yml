@@ -60,8 +60,9 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - gitlab-runner-config:/etc/gitlab-runner
+      - ./runner-ssh:/root/.ssh
     environment:
-      CI_SERVER_URL: "http://gitlab"
+      CI_SERVER_URL: "https://${GITLAB_HOST}"
       REGISTRATION_TOKEN: "${RUNNER_REGISTRATION_TOKEN}"
       RUNNER_NAME: "${GITLAB_CONTAINER_NAME}_runner"
       RUNNER_EXECUTOR: "docker"
@@ -71,6 +72,32 @@ services:
       - -c
       - |
         set -e
+        mkdir -p /root/.ssh
+        chmod 700 /root/.ssh
+        which ssh-keygen >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends openssh-client)
+
+        # Generate SSH keypair if missing
+        if [ ! -f /root/.ssh/gitlab-runner-deploy ]; then
+          echo "[INIT] no SSH key found, generating ed25519 keypair..."
+          ssh-keygen -t ed25519 -C "gitlab-runner-deploy" -f /root/.ssh/gitlab-runner-deploy -N ""
+          echo "[INIT] === PUBLIC KEY (append to authorized_keys on target hosts) ==="
+          cat /root/.ssh/gitlab-runner-deploy.pub
+          echo "[INIT] ============================================================="
+        fi
+
+        # Generate deploy-bundle (committable files) if missing
+        if [ ! -d /root/.ssh/deploy-bundle ]; then
+          echo "[INIT] generating deploy-bundle..."
+          mkdir -p /root/.ssh/deploy-bundle
+          cp /root/.ssh/gitlab-runner-deploy /root/.ssh/deploy-bundle/id_ed25519
+          chmod 600 /root/.ssh/deploy-bundle/id_ed25519
+          cp /root/.ssh/gitlab-runner-deploy.pub /root/.ssh/deploy-bundle/id_ed25519.pub
+          base64 -w0 /root/.ssh/gitlab-runner-deploy > /root/.ssh/deploy-bundle/id_ed25519.b64
+          echo "[INIT] deploy-bundle written to /root/.ssh/deploy-bundle/"
+          echo "[INIT]   - id_ed25519      (private, ready to commit at .deploy/id_ed25519)"
+          echo "[INIT]   - id_ed25519.pub  (public)"
+          echo "[INIT]   - id_ed25519.b64  (base64 one-line, ready for CI variable)"
+        fi
         if [ ! -s /etc/gitlab-runner/config.toml ]; then
           echo "[INIT] no config.toml found, registering runner..."
           gitlab-runner register \
