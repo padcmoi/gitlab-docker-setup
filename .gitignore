@@ -1,1 +1,6 @@
 .env
+
+runner-ssh/
+data/
+logs/
+config/
