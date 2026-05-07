@@ -85,7 +85,7 @@ services:
           echo "[INIT] ============================================================="
         fi
 
-        # Generate deploy-bundle (committable files) if missing
+        # Generate deploy-bundle (handy copies for the gpv2 group setup) if missing
         if [ ! -d /root/.ssh/deploy-bundle ]; then
           echo "[INIT] generating deploy-bundle..."
           mkdir -p /root/.ssh/deploy-bundle
@@ -94,9 +94,11 @@ services:
           cp /root/.ssh/gitlab-runner-deploy.pub /root/.ssh/deploy-bundle/id_ed25519.pub
           base64 -w0 /root/.ssh/gitlab-runner-deploy > /root/.ssh/deploy-bundle/id_ed25519.b64
           echo "[INIT] deploy-bundle written to /root/.ssh/deploy-bundle/"
-          echo "[INIT]   - id_ed25519      (private, ready to commit at .deploy/id_ed25519)"
-          echo "[INIT]   - id_ed25519.pub  (public)"
-          echo "[INIT]   - id_ed25519.b64  (base64 one-line, ready for CI variable)"
+          echo "[INIT]   - id_ed25519      (private, raw — backup/inspection only, never commit)"
+          echo "[INIT]   - id_ed25519.pub  (public — append to ~/.ssh/authorized_keys on each target server)"
+          echo "[INIT]   - id_ed25519.b64  (base64 one-line — paste into the gpv2 group variable"
+          echo "[INIT]                       SSH_PRIVATE_KEY_B64, type 'Variable', visibility 'Masquée et cachée',"
+          echo "[INIT]                       at https://<your-gitlab>/groups/gpv2/-/settings/ci_cd)"
         fi
         if [ ! -s /etc/gitlab-runner/config.toml ]; then
           echo "[INIT] no config.toml found, registering runner..."
