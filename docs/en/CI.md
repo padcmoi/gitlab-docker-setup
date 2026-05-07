@@ -1,276 +1,192 @@
-# GitLab CI/CD setup — end-to-end guide
+# GitLab CI/CD — end-to-end SSH-deploy guide
 
-This guide covers the **full setup** to deploy a NestJS template project from GitLab to a remote VPS via SSH, using a self-hosted GitLab + group runner running in Docker on the GitLab host.
+_🇬🇧 English | [🇫🇷 Version française](../fr/CI.md)_
 
-The chain :
+This guide covers the **complete setup** for deploying any project of a GitLab
+group to a remote server via SSH, using the self-hosted GitLab + Group Runner
+shipped by this template.
+
+The chain:
 
 ```
-git push main  →  GitLab pipeline  →  group runner  →  SSH agir2  →  git pull + pnpm install + prod:up
+git push main → GitLab pipeline → Group Runner → SSH target server → git pull + build
 ```
 
-No CI variable dependency for SSH — keys live in the project repo (`.deploy/`) so the deploy works on any project of the group with zero GitLab UI configuration.
+The **deploy SSH key lives in a single GitLab group-level CI/CD variable**
+(`SSH_PRIVATE_KEY_B64`, base64-encoded, `Masked and hidden`). Every project of
+the group inherits it automatically. **Nothing secret ever lives in a project
+repo.**
+
+---
+
+## TL;DR
+
+1. Spin up GitLab + Runner with `docker compose up -d`. The runner
+   auto-generates an ed25519 keypair and a `deploy-bundle/`.
+2. On every target server: append `id_ed25519.pub` to
+   `~/.ssh/authorized_keys`.
+3. In the GitLab UI: create a Group, register the runner, then create a
+   **Group CI/CD Variable** named `SSH_PRIVATE_KEY_B64`, type `Variable`,
+   visibility `Masked and hidden`, value = content of `id_ed25519.b64`.
+4. In each project of the group: add a `.gitlab-ci.yml` that decodes the key
+   at job time and SSHes to the target.
 
 ---
 
 ## 1. Prerequisites
 
-- A host (any Linux + Docker) for GitLab + GitLab Runner
-- A target VPS reachable via SSH (in our example : `agir2.naskot.fr` on port `51234`, user `debian`)
-- The target VPS must have at minimum :
-  - A working `git` and `pnpm` (Node.js)
-  - Docker + Docker Compose v2
-  - The project cloned at the deploy path (e.g. `/var/docker/gestionpratique.ovh/x-ged-extract`)
+- A host (Linux + Docker) for GitLab + GitLab Runner — covered by the main
+  `docker-compose.yml` of this template.
+- One or more target servers reachable via SSH for deploys.
+- A reverse proxy in front of GitLab for TLS termination (sample configs in
+  this repo: `apache-gitlab.conf`, `nginx-gitlab.conf`).
 
 ---
 
-## 2. GitLab + Runner — `docker-compose.yml`
+## 2. Bring GitLab + Runner up
 
-Drop this `docker-compose.yml` on the GitLab host (with a sibling `.env` providing the variables) :
+Follow the main [README](README.md) (or the [French version](../fr/README.md)).
 
-```yaml
-services:
-  gitlab:
-    container_name: "${GITLAB_CONTAINER_NAME}"
-    image: "gitlab/gitlab-ce:latest"
-    restart: on-failure
-    hostname: "${GITLAB_HOST}"
-    environment:
-      GITLAB_ROOT_EMAIL: "${GITLAB_ROOT_EMAIL}"
-      GITLAB_ROOT_PASSWORD: "${GITLAB_ROOT_PASSWORD}"
-      GITLAB_OMNIBUS_CONFIG: |
-        external_url 'https://${GITLAB_HOST}'
-        nginx['listen_port'] = 80
-        nginx['listen_https'] = false
+The runner container, on first boot, runs an idempotent entrypoint that:
 
-        gitlab_rails['smtp_enable'] = ${SMTP_ENABLE}
-        gitlab_rails['smtp_address'] = "${SMTP_ADDRESS}"
-        gitlab_rails['smtp_port'] = ${SMTP_PORT}
-        gitlab_rails['smtp_user_name'] = "${SMTP_USER}"
-        gitlab_rails['smtp_password'] = "${SMTP_PASS}"
-        gitlab_rails['smtp_domain'] = "${SMTP_DOMAIN}"
-        gitlab_rails['smtp_authentication'] = "login"
-        gitlab_rails['smtp_enable_starttls_auto'] = true
-        gitlab_rails['gitlab_email_from'] = "${SMTP_FROM}"
-        gitlab_rails['gitlab_email_reply_to'] = "${SMTP_REPLY_TO}"
+- Generates an ed25519 keypair at `/root/.ssh/gitlab-runner-deploy[.pub]`
+  if missing.
+- Generates a `deploy-bundle/` containing 3 ready-to-use copies:
+  - `id_ed25519` — raw private key (backup/inspection only, **never commit**).
+  - `id_ed25519.pub` — public key (to install on target servers).
+  - `id_ed25519.b64` — base64 single-line (the value to paste into the GitLab
+    Group CI Variable).
+- Registers the runner with GitLab if `config.toml` is missing.
 
-        puma['worker_processes'] = 1
-        sidekiq['max_concurrency'] = 5
-        prometheus_monitoring['enable'] = true
-
-        gitlab_rails['log_level'] = :warn
-        sidekiq['log_level'] = :warn
-        gitlab_workhorse['log_format'] = "none"
-
-        logrotate['enable'] = true
-        logrotate['rotate'] = 7
-        logrotate['size'] = '100M'
-    ports:
-      - "127.0.0.1:${HTTP_PORT}:80"
-      - "${SSH_PORT}:22"
-    volumes:
-      - "./config:/etc/gitlab"
-      - "./logs:/var/log/gitlab"
-      - "./data:/var/opt/gitlab"
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50M"
-        max-file: "3"
-
-  gitlab-runner:
-    container_name: "${GITLAB_CONTAINER_NAME}_runner"
-    image: "gitlab/gitlab-runner:latest"
-    restart: unless-stopped
-    depends_on:
-      - gitlab
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - gitlab-runner-config:/etc/gitlab-runner
-      - ./runner-ssh:/root/.ssh
-    environment:
-      CI_SERVER_URL: "https://${GITLAB_HOST}"
-      REGISTRATION_TOKEN: "${RUNNER_REGISTRATION_TOKEN}"
-      RUNNER_NAME: "${GITLAB_CONTAINER_NAME}_runner"
-      RUNNER_EXECUTOR: "docker"
-      DOCKER_IMAGE: "docker:24"
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -e
-        mkdir -p /root/.ssh
-        chmod 700 /root/.ssh
-        which ssh-keygen >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends openssh-client)
-
-        # Generate SSH keypair if missing
-        if [ ! -f /root/.ssh/gitlab-runner-deploy ]; then
-          echo "[INIT] no SSH key found, generating ed25519 keypair..."
-          ssh-keygen -t ed25519 -C "gitlab-runner-deploy" -f /root/.ssh/gitlab-runner-deploy -N ""
-          echo "[INIT] === PUBLIC KEY (append to authorized_keys on target hosts) ==="
-          cat /root/.ssh/gitlab-runner-deploy.pub
-          echo "[INIT] ============================================================="
-        fi
-
-        # Generate deploy-bundle (committable files) if missing
-        if [ ! -d /root/.ssh/deploy-bundle ]; then
-          echo "[INIT] generating deploy-bundle..."
-          mkdir -p /root/.ssh/deploy-bundle
-          cp /root/.ssh/gitlab-runner-deploy /root/.ssh/deploy-bundle/id_ed25519
-          chmod 600 /root/.ssh/deploy-bundle/id_ed25519
-          cp /root/.ssh/gitlab-runner-deploy.pub /root/.ssh/deploy-bundle/id_ed25519.pub
-          base64 -w0 /root/.ssh/gitlab-runner-deploy > /root/.ssh/deploy-bundle/id_ed25519.b64
-          echo "[INIT] deploy-bundle written to /root/.ssh/deploy-bundle/"
-        fi
-
-        if [ ! -s /etc/gitlab-runner/config.toml ]; then
-          echo "[INIT] no config.toml found, registering runner..."
-          gitlab-runner register \
-            --non-interactive \
-            --url "$$CI_SERVER_URL" \
-            --token "$$REGISTRATION_TOKEN" \
-            --name "$$RUNNER_NAME" \
-            --executor "$$RUNNER_EXECUTOR" \
-            --docker-image "$$DOCKER_IMAGE" \
-            --docker-privileged \
-            --docker-volumes "/var/run/docker.sock:/var/run/docker.sock"
-        else
-          echo "[INIT] existing config.toml found, skipping registration"
-        fi
-        exec /entrypoint run --user=gitlab-runner --working-directory=/home/gitlab-runner
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "20M"
-        max-file: "3"
-
-volumes:
-  gitlab-runner-config:
-    external: true
-```
-
-`.env` (sibling) :
-
-```bash
-GITLAB_CONTAINER_NAME=gitlab_ce
-GITLAB_HOST=gitlab.example.com
-GITLAB_ROOT_EMAIL=admin@example.com
-GITLAB_ROOT_PASSWORD=changeme
-HTTP_PORT=8080
-SSH_PORT=2222
-RUNNER_REGISTRATION_TOKEN=glrt-xxxxxxxxx   # group registration token (see step 4)
-
-SMTP_ENABLE=false
-SMTP_ADDRESS=
-SMTP_PORT=587
-SMTP_USER=
-SMTP_PASS=
-SMTP_DOMAIN=
-SMTP_FROM=
-SMTP_REPLY_TO=
-```
-
-Create the external volume once :
-
-```bash
-docker volume create gitlab-runner-config
-```
-
----
-
-## 3. First start — auto-generated SSH key
-
-```bash
-docker compose up -d
-```
-
-At first boot, the runner generates :
-
-```
-./runner-ssh/
-├── deploy-bundle/
-│   ├── id_ed25519        ← private key (committable into .deploy/ of any project)
-│   ├── id_ed25519.pub    ← public key
-│   └── id_ed25519.b64    ← base64 one-line (alternative: paste into a CI variable)
-├── gitlab-runner-deploy
-└── gitlab-runner-deploy.pub
-```
-
-Verify :
+Verify after start:
 
 ```bash
 ls runner-ssh/deploy-bundle/
+# → id_ed25519  id_ed25519.b64  id_ed25519.pub
+
 docker logs ${GITLAB_CONTAINER_NAME}_runner | grep -A1 'PUBLIC KEY'
+# → ssh-ed25519 AAAA... gitlab-runner-deploy
 ```
 
 ---
 
-## 4. GitLab — group runner registration
+## 3. Create a GitLab group and register the runner
 
-(Once per GitLab instance. The runner is at the group level so all projects in the group share it.)
+(One-shot, in the GitLab UI.)
 
-1. In the GitLab UI : create a group (e.g. `gpv2`).
-2. Go to **Group → Settings → CI/CD → Runners → New group runner**.
-3. Tags : leave empty. Untagged jobs : ✓. Description : `gpv2-group-runner`. Save.
-4. Copy the registration token. Paste it as `RUNNER_REGISTRATION_TOKEN` in the `.env`.
-5. Restart the runner so it picks up the token :
+1. Top-left → **New group** → name it (e.g. `myorg`).
+2. **Group → Settings → CI/CD → Runners → New group runner**.
+   - Tags: leave empty.
+   - Untagged jobs: ✓ Run untagged jobs.
+   - Description: `myorg-group-runner`.
+   - Save → copy the registration token shown.
+3. Paste the token as `RUNNER_REGISTRATION_TOKEN` in `.env`.
+4. Restart the runner so the entrypoint picks it up:
    ```bash
    docker compose stop gitlab-runner
-   docker volume inspect gitlab-runner-config --format '{{ .Mountpoint }}'
-   sudo rm /var/lib/docker/volumes/gitlab-runner-config/_data/config.toml
+   sudo rm "$(docker volume inspect gitlab-runner-config --format '{{ .Mountpoint }}')/config.toml"
    docker compose up -d gitlab-runner
    ```
-6. Group → Settings → CI/CD → Runners → check the runner appears « Online ».
+5. Group → Settings → CI/CD → Runners → confirm the runner appears « Online ».
 
 ---
 
-## 5. Authorize the runner key on the target VPS
+## 4. Authorize the runner key on each target server
 
-On `agir2.naskot.fr` :
+For every server you intend to deploy to (in the simplest case: just one):
 
 ```bash
-# as the deploy user (debian)
+# On the target server, as the user the deploy will use (often `debian`):
 echo "<contents of runner-ssh/deploy-bundle/id_ed25519.pub>" >> ~/.ssh/authorized_keys
 chmod 600 ~/.ssh/authorized_keys
 ```
 
-Verify the runner can SSH in (from inside the runner container) :
+That's it. Every gpv2 project deploying to this server can now use the
+runner's private key.
+
+Sanity check from the runner container:
 
 ```bash
 docker exec -it ${GITLAB_CONTAINER_NAME}_runner sh -c \
-  'ssh -i /root/.ssh/gitlab-runner-deploy -p 51234 debian@agir2.naskot.fr "echo OK"'
+  'ssh -o StrictHostKeyChecking=accept-new -p <SSH_PORT> <USER>@<HOST> "echo OK"'
 ```
 
 ---
 
-## 6. Project setup — `.deploy/` folder
+## 5. Create the Group CI/CD Variable (the key piece)
 
-In the **project repo** (e.g. `gpv2/x-ged-extract`), create :
+This is what makes the deploy reusable across every project of the group
+without ever putting a secret in a repo.
 
-```
-.deploy/
-├── id_ed25519        ← copy of runner-ssh/deploy-bundle/id_ed25519 (private key)
-└── known_hosts       ← see below
-```
+Open: **Group → Settings → CI/CD → Variables → Add variable**.
 
-Generate `known_hosts` once (any host with network access to agir2) :
+| Field | Value |
+|---|---|
+| **Type** | `Variable` |
+| **Environments** | `*` (All) |
+| **Visibility** | **`Masked and hidden`** |
+| **Flags → Protect variable** | unchecked (see note below) |
+| **Flags → Expand variable reference** | leave checked (default) |
+| **Key** | `SSH_PRIVATE_KEY_B64` |
+| **Value** | the entire content of `runner-ssh/deploy-bundle/id_ed25519.b64` (a single-line base64 string) |
+
+**Why these choices:**
+
+- **Type `Variable`** (not `File`): GitLab's `File` type sometimes mangles
+  multi-line values pasted from the UI (line endings, trailing whitespace),
+  causing `error in libcrypto` at runtime. Storing the key as a single-line
+  base64 string and decoding at job time bypasses this entirely.
+- **`Masked and hidden`**: once saved, **the value cannot be retrieved from
+  the UI or API** — even by Owners or admins. To rotate, you delete + recreate.
+  This is the strongest protection against silent UI/API leaks.
+- **Not Protected**: a Protected variable is only exposed to pipelines on
+  Protected branches/tags. If you Protect it, you must also mark every
+  deploying branch (typically `main`) as Protected — see step 7. You can
+  start unprotected (simpler) and tighten later.
+
+To populate the value from the host:
 
 ```bash
-ssh-keyscan -p 51234 agir2.naskot.fr > .deploy/known_hosts
+cat runner-ssh/deploy-bundle/id_ed25519.b64
+# → copy the entire single-line output and paste it into the UI Value field
 ```
-
-Commit and push the `.deploy/` folder. ⚠ The private key lives in the repo — make sure the repo is private and trusted.
 
 ---
 
-## 7. `.gitlab-ci.yml`
+## 6. (Recommended) Protect `main` on each project
 
-In the project root :
+This is what makes a Protected `SSH_PRIVATE_KEY_B64` actually usable, AND
+prevents random feature branches from running pipelines that could try to
+exfiltrate the key.
+
+For each project: **Settings → Repository → Branch rules → Add branch rule**.
+
+| Field | Value |
+|---|---|
+| Branch name | `main` |
+| Allowed to push and merge | the role you trust to deploy (usually `Maintainers`) |
+| Allowed to merge | same |
+| Allow force push | unchecked |
+
+For the **whole group** going forward, you can also pre-set this at the
+group level: **Group → Settings → General → Permissions and group
+features → Default branch protection → "Protected"**. This applies only to
+**newly-created** projects in the group; existing projects must be done
+one-by-one (or via the GitLab API).
+
+---
+
+## 7. Project `.gitlab-ci.yml`
+
+A reusable template that any project of the group can drop in, customizing
+only 5 variables:
 
 ```yaml
-# GitLab CI/CD pipeline for x-ged-extract
-# develop : pnpm test:up
-# main    : pnpm test:up → (auto on green) deploy SSH agir2 + git pull + prod:down/up
-# SSH key + known_hosts read from repo files (no CI variables, no GitLab UI dependency)
+# CI/CD pipeline — generic gpv2 NestJS API microservice template.
+#
+# Customize the 5 # CUSTOMIZE variables below per project. Everything else
+# is shared and ships from the GitLab Group CI/CD Variables (the SSH key)
+# and the runner.
 
 workflow:
   rules:
@@ -285,14 +201,17 @@ stages:
   - deploy
 
 variables:
+  # === CUSTOMIZE per project ================================================
+  DEPLOY_HOST: "your-target.example.com"               # CUSTOMIZE
+  DEPLOY_USER: "debian"                                # CUSTOMIZE
+  DEPLOY_PORT: "22"                                    # CUSTOMIZE
+  DEPLOY_PATH: "/var/docker/your-org/your-project"     # CUSTOMIZE
+  COMPOSE_PROFILES_DEPLOY: "--mariadb"                 # CUSTOMIZE
+  # === Constants — do not modify ============================================
   DOCKER_DRIVER: overlay2
   DOCKER_TLS_CERTDIR: ""
   PNPM_VERSION: "10.33.0"
   HUSKY: "0"
-  DEPLOY_HOST: "agir2.naskot.fr"
-  DEPLOY_USER: "debian"
-  DEPLOY_PORT: "51234"
-  DEPLOY_PATH: "/var/docker/gestionpratique.ovh/x-ged-extract"
 
 cache:
   key:
@@ -302,7 +221,7 @@ cache:
     - .pnpm-store/
     - node_modules/
 
-# stage 1 — test (develop + main)
+# Stage 1 — test (develop + main)
 pnpm-test-up:
   stage: test
   interruptible: true
@@ -314,7 +233,7 @@ pnpm-test-up:
     - npm install -g pnpm@${PNPM_VERSION}
     - pnpm install --frozen-lockfile
   script:
-    - pnpm run test:up -- --rabbitmq --adminui --minio --mariadb --pgsql
+    - pnpm run test:up -- $COMPOSE_PROFILES_DEPLOY
   after_script:
     - pnpm run test:down || true
   rules:
@@ -322,7 +241,7 @@ pnpm-test-up:
     - if: $CI_COMMIT_BRANCH == "main"
   timeout: 30 minutes
 
-# stage 2 — deploy (main only, auto on green tests)
+# Stage 2 — deploy (main only, auto on green tests)
 deploy-prod:
   stage: deploy
   image: alpine:3
@@ -332,12 +251,21 @@ deploy-prod:
   cache: []
   before_script:
     - apk add --no-cache openssh-client
-    - mkdir -p ~/.ssh
-    - chmod 700 ~/.ssh
-    - cp .deploy/id_ed25519 ~/.ssh/id_ed25519
+    - mkdir -p ~/.ssh && chmod 700 ~/.ssh
+    # Decode the key from the group-level Hidden variable into a real file.
+    - echo "$SSH_PRIVATE_KEY_B64" | base64 -d > ~/.ssh/id_ed25519
     - chmod 600 ~/.ssh/id_ed25519
-    - cp .deploy/known_hosts ~/.ssh/known_hosts
-    - chmod 644 ~/.ssh/known_hosts
+    # Fail fast if the decoded key is malformed.
+    - ssh-keygen -lf ~/.ssh/id_ed25519
+    # TOFU host fingerprints (no static known_hosts to maintain).
+    - |
+      cat > ~/.ssh/config <<EOF
+      Host *
+        StrictHostKeyChecking=accept-new
+        UserKnownHostsFile=/dev/null
+        LogLevel=ERROR
+      EOF
+    - chmod 600 ~/.ssh/config
   script:
     - |
       ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=30 -o ServerAliveCountMax=10 \
@@ -349,7 +277,7 @@ deploy-prod:
         git reset --hard origin/main
         pnpm install
         pnpm prod:down || true
-        pnpm prod:up --rabbitmq --adminui --minio --mariadb --pgsql
+        pnpm prod:up $COMPOSE_PROFILES_DEPLOY
       "
   rules:
     - if: $CI_COMMIT_BRANCH == "main"
@@ -359,77 +287,125 @@ deploy-prod:
   timeout: 15 minutes
 ```
 
+**Key points:**
+
+- The deploy job decodes `$SSH_PRIVATE_KEY_B64` into `~/.ssh/id_ed25519` at
+  the very start, then `ssh-keygen -lf` validates the key as a fail-fast
+  sanity check (printing its SHA256 fingerprint into the job log).
+- `StrictHostKeyChecking=accept-new` + `UserKnownHostsFile=/dev/null`
+  removes any need to maintain a static `known_hosts`. First-contact
+  fingerprints are accepted automatically; new target servers don't need any
+  per-project change.
+
 ---
 
-## 8. Initial clone on the target VPS
+## 8. Initial clone on the target server
 
-Once on `agir2.naskot.fr`, as `debian` :
+Once per project, before the first deploy:
 
 ```bash
-sudo mkdir -p /var/docker/gestionpratique.ovh
-sudo chown -R debian:debian /var/docker/gestionpratique.ovh
-cd /var/docker/gestionpratique.ovh
-git clone -b main <project-https-or-ssh-url> x-ged-extract
-cd x-ged-extract
-pnpm install     # generates .env.dev/.env.prod/.env.test via postinstall
+# On the target server, as the deploy user
+sudo mkdir -p /var/docker/your-org
+sudo chown -R debian:debian /var/docker/your-org
+cd /var/docker/your-org
+git clone -b main <project-https-or-ssh-url> your-project
+cd your-project
+pnpm install      # generates .env.dev/.env.prod/.env.test if your project uses them
 ```
-
-(`.env.prod` is auto-generated by the `postinstall` script of the boilerplate. Edit it if production credentials differ from the random defaults.)
 
 ---
 
 ## 9. Pipeline flow
 
-| Branch / event      | Stages run                               | Effect                            |
-| ------------------- | ---------------------------------------- | --------------------------------- |
-| push `develop`      | `pnpm-test-up`                           | Validates the tree                |
-| push `main`         | `pnpm-test-up` → (green) → `deploy-prod` | Validates + auto-deploys to agir2 |
-| push tag, MR, other | none (filtered by `workflow.rules`)      |                                   |
+| Branch / event | Stages run | Effect |
+|---|---|---|
+| push `develop` | `pnpm-test-up` | Validates the tree |
+| push `main` | `pnpm-test-up` → (green) → `deploy-prod` | Validates + auto-deploys |
+| push tag, MR, other | none (filtered by `workflow.rules`) | |
 
-Deploy job steps (on agir2) :
+Deploy job actions (on the target server):
 
 1. `git fetch origin main`
 2. `git reset --hard origin/main` (handles any local divergence)
-3. `pnpm install` (regenerates `node_modules` + auto-creates missing `.env.*`)
-4. `pnpm prod:down` (stops containers)
-5. `pnpm prod:up --rabbitmq --adminui --minio --mariadb --pgsql` (rebuilds + starts)
+3. `pnpm install`
+4. `pnpm prod:down`
+5. `pnpm prod:up <profiles>`
 
 ---
 
-## 10. Troubleshooting
+## 10. Re-using on other projects in the group
 
-| Symptom                                             | Cause                                                    | Fix                                                                   |
-| --------------------------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------- |
-| `base64: : No such file or directory` in deploy job | CI variable missing or empty                             | Ensure `.deploy/id_ed25519` is committed, not relying on CI variables |
-| `Permission denied (publickey)`                     | Public key not in `authorized_keys` on target            | Re-do step 5                                                          |
-| `fatal: Not possible to fast-forward`               | Local main on agir2 has diverged from origin             | The deploy already uses `git reset --hard` — should self-heal         |
-| `pnpm: command not found` on agir2                  | pnpm/Node missing on target                              | Install Node 22+ and pnpm on agir2                                    |
-| `REDIS_PERSIST_USER missing`                        | `.env.prod` not populated                                | `pnpm install` on agir2 once to auto-generate, then edit values       |
-| Runner offline                                      | `RUNNER_REGISTRATION_TOKEN` invalid or stale config.toml | Re-do step 4 (wipe config.toml + restart)                             |
+For each new project in the group:
 
----
+1. Drop the same `.gitlab-ci.yml` (above) into the project root.
+2. Adjust the 5 `# CUSTOMIZE` variables for the target.
+3. (If you Protected the variable in step 5) protect `main` on the new
+   project (step 6).
+4. Clone the project on the target server at the path matching `DEPLOY_PATH`.
+5. Push to `main`.
 
-## 11. Re-using on other projects
-
-For each new project in the same group :
-
-1. Copy `.deploy/id_ed25519` and `.deploy/known_hosts` from this project (or regenerate `known_hosts` if the target is different).
-2. Copy `.gitlab-ci.yml` and adapt `DEPLOY_*` variables.
-3. Clone the project on the target VPS at the path matching `DEPLOY_PATH`.
-4. Push to main → done.
-
-No GitLab UI config required (no protected branches dance, no Project Access Tokens, no CI variables).
+**No GitLab UI variable to create per project.** No `.deploy/` folder. No
+secret in the repo.
 
 ---
 
-## 12. Key rotation
+## 11. Rotating the SSH key
 
-If the runner SSH key is leaked or you want to rotate :
+Do this if the key is leaked, or as routine hygiene every N months.
 
-1. Stop the runner : `docker compose stop gitlab-runner`
-2. Delete `runner-ssh/gitlab-runner-deploy*` and `runner-ssh/deploy-bundle/`
-3. Restart : `docker compose up -d gitlab-runner` → new keypair generated
-4. Add new public to `authorized_keys` on agir2 (and remove old)
-5. Update `.deploy/id_ed25519` in every project that uses this runner
+1. **Generate a new keypair on the runner** (same VPS as GitLab):
+   ```bash
+   docker exec ${GITLAB_CONTAINER_NAME}_runner sh -c '
+     rm -f /root/.ssh/gitlab-runner-deploy /root/.ssh/gitlab-runner-deploy.pub
+     rm -rf /root/.ssh/deploy-bundle
+     ssh-keygen -t ed25519 -C "gitlab-runner-deploy" -f /root/.ssh/gitlab-runner-deploy -N ""
+     mkdir -p /root/.ssh/deploy-bundle
+     cp /root/.ssh/gitlab-runner-deploy /root/.ssh/deploy-bundle/id_ed25519
+     chmod 600 /root/.ssh/deploy-bundle/id_ed25519
+     cp /root/.ssh/gitlab-runner-deploy.pub /root/.ssh/deploy-bundle/id_ed25519.pub
+     base64 -w0 /root/.ssh/gitlab-runner-deploy > /root/.ssh/deploy-bundle/id_ed25519.b64
+     echo "=== NEW PUBLIC KEY ==="
+     cat /root/.ssh/gitlab-runner-deploy.pub
+     echo "======================"
+   '
+   ```
+2. **Add the new pubkey** to `~/.ssh/authorized_keys` on every target server
+   **before** removing the old one. Test SSH with the new key.
+3. **Remove the old pubkey** from `~/.ssh/authorized_keys` on every target.
+4. **Update the GitLab Group Variable**: since `SSH_PRIVATE_KEY_B64` is
+   `Masked and hidden`, you cannot edit the value — you must delete and
+   recreate. Group → Settings → CI/CD → Variables:
+   - 🗑️ delete `SSH_PRIVATE_KEY_B64`
+   - Add variable with the same settings as step 5, value = new
+     `id_ed25519.b64`.
+5. Re-run the latest deploy pipeline to verify.
 
 ---
+
+## 12. Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `error in libcrypto` in deploy job | Key value got mangled (line endings, BOM, etc.) when entering GitLab UI | Use base64 + `env_var` type as documented; verify with `ssh-keygen -lf` after decode |
+| `Permission denied (publickey)` | Public key not on the target server, or wrong user | Re-do step 4 on the right user/server |
+| Variable empty in the job, deploy fails before SSH | Variable is Protected but the branch is not | Either uncheck Protected (step 5) or protect the branch (step 6) |
+| Runner offline | `RUNNER_REGISTRATION_TOKEN` invalid or stale `config.toml` | Re-do step 3 (wipe `config.toml` + restart) |
+| Pipeline never starts | `workflow.rules` filtered out the event (e.g. tag) | Check the rules block of `.gitlab-ci.yml` |
+
+---
+
+## Legacy alternative (deprecated — do not use for new setups)
+
+Older versions of this guide stored the private key directly in each
+project repo at `.deploy/id_ed25519` and the host fingerprints at
+`.deploy/known_hosts`. **This is no longer recommended:**
+
+- A leaked private key in git history stays there forever — even after
+  removal, it must be considered permanently compromised.
+- Every project carries its own copy of the secret → harder to rotate
+  consistently.
+- Anyone with read access to the repo (current or future, including via
+  backups) has the key.
+
+If you have an existing project using this pattern, migrate to the
+`SSH_PRIVATE_KEY_B64` group variable workflow above and rotate the key.
