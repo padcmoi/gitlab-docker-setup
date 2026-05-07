@@ -1,9 +1,17 @@
 services:
   gitlab:
     container_name: "${GITLAB_CONTAINER_NAME}"
-    image: "gitlab/gitlab-ce:latest"
+    # Pin via GITLAB_VERSION in .env (e.g. 17.5.2-ce.0). Default keeps prior
+    # behavior (`latest`) for compatibility — recommend pinning in production.
+    image: "gitlab/gitlab-ce:${GITLAB_VERSION:-latest}"
     restart: on-failure
     hostname: "${GITLAB_HOST}"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1/-/readiness"]
+      interval: 30s
+      timeout: 10s
+      retries: 20
+      start_period: 5m
     environment:
       GITLAB_ROOT_EMAIL: "${GITLAB_ROOT_EMAIL}"
       GITLAB_ROOT_PASSWORD: "${GITLAB_ROOT_PASSWORD}"
@@ -53,10 +61,13 @@ services:
 
   gitlab-runner:
     container_name: "${GITLAB_CONTAINER_NAME}_runner"
-    image: "gitlab/gitlab-runner:latest"
+    # Pin via RUNNER_VERSION in .env (e.g. 17.5.0). Default `latest` preserves
+    # prior behavior — recommend pinning to match the GitLab server version.
+    image: "gitlab/gitlab-runner:${RUNNER_VERSION:-latest}"
     restart: unless-stopped
     depends_on:
-      - gitlab
+      gitlab:
+        condition: service_healthy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - gitlab-runner-config:/etc/gitlab-runner
@@ -74,18 +85,25 @@ services:
         set -e
         mkdir -p /root/.ssh
         chmod 700 /root/.ssh
-        which ssh-keygen >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends openssh-client)
 
-        # Generate SSH keypair if missing
+        # Ensure ssh-keygen is available. The official runner image (Ubuntu)
+        # ships it; this fallback covers exotic base images.
+        if ! command -v ssh-keygen >/dev/null 2>&1; then
+          if   command -v apt-get >/dev/null 2>&1; then apt-get update && apt-get install -y --no-install-recommends openssh-client
+          elif command -v apk     >/dev/null 2>&1; then apk add --no-cache openssh-keygen
+          fi
+        fi
+
+        # Generate the deploy keypair if missing (idempotent across restarts).
         if [ ! -f /root/.ssh/gitlab-runner-deploy ]; then
           echo "[INIT] no SSH key found, generating ed25519 keypair..."
           ssh-keygen -t ed25519 -C "gitlab-runner-deploy" -f /root/.ssh/gitlab-runner-deploy -N ""
-          echo "[INIT] === PUBLIC KEY (append to authorized_keys on target hosts) ==="
+          echo "[INIT] === PUBLIC KEY (append to authorized_keys on every target host) ==="
           cat /root/.ssh/gitlab-runner-deploy.pub
-          echo "[INIT] ============================================================="
+          echo "[INIT] ================================================================"
         fi
 
-        # Generate deploy-bundle (handy copies for the gpv2 group setup) if missing
+        # Generate the deploy-bundle (handy copies for the GitLab UI step).
         if [ ! -d /root/.ssh/deploy-bundle ]; then
           echo "[INIT] generating deploy-bundle..."
           mkdir -p /root/.ssh/deploy-bundle
@@ -94,14 +112,18 @@ services:
           cp /root/.ssh/gitlab-runner-deploy.pub /root/.ssh/deploy-bundle/id_ed25519.pub
           base64 -w0 /root/.ssh/gitlab-runner-deploy > /root/.ssh/deploy-bundle/id_ed25519.b64
           echo "[INIT] deploy-bundle written to /root/.ssh/deploy-bundle/"
-          echo "[INIT]   - id_ed25519      (private, raw — backup/inspection only, never commit)"
+          echo "[INIT]   - id_ed25519      (private, raw — backup/inspection only, NEVER commit)"
           echo "[INIT]   - id_ed25519.pub  (public — append to ~/.ssh/authorized_keys on each target server)"
-          echo "[INIT]   - id_ed25519.b64  (base64 one-line — paste into the gpv2 group variable"
-          echo "[INIT]                       SSH_PRIVATE_KEY_B64, type 'Variable', visibility 'Masquée et cachée',"
-          echo "[INIT]                       at https://<your-gitlab>/groups/gpv2/-/settings/ci_cd)"
+          echo "[INIT]   - id_ed25519.b64  (base64 one-line — paste into a GitLab Group CI/CD"
+          echo "[INIT]                       Variable named SSH_PRIVATE_KEY_B64, Type 'Variable',"
+          echo "[INIT]                       Visibility 'Masked and hidden'. See readme-ci.md.)"
         fi
+
         if [ ! -s /etc/gitlab-runner/config.toml ]; then
           echo "[INIT] no config.toml found, registering runner..."
+          # NOTE: --docker-privileged + docker.sock mount = host root from any
+          # pipeline. Acceptable for trusted/internal use; review before
+          # exposing the runner to untrusted forks/MRs.
           gitlab-runner register \
             --non-interactive \
             --url "$$CI_SERVER_URL" \
@@ -122,5 +144,9 @@ services:
         max-file: "3"
 
 volumes:
+  # External volume (must be created before first start with:
+  #   docker volume create gitlab-runner-config
+  # Persists the runner registration (config.toml) across container
+  # recreates / `docker compose down -v`. Documented in README.
   gitlab-runner-config:
     external: true
