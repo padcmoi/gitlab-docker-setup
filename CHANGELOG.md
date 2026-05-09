@@ -2,6 +2,33 @@
 
 This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and Semantic Versioning.
 
+## [1.2.0] - 2026-05-09
+
+### Added
+
+- `README.md`: optional host-level cron setup to auto-clean unused (dangling) Docker volumes left by CI jobs (manual preview command + `/etc/cron.d/docker-volume-cleanup` daily at 03:00).
+- `.env.sample`: new `GITLAB_PROMETHEUS_ENABLED` toggle (default `false`) — Prometheus internal monitoring is now opt-in (was hard-coded `true`, non-trivial RAM footprint on small servers).
+
+### Changed
+
+- `.env.sample`: pinned default versions `GITLAB_VERSION=18.4.1-ce.0` and `RUNNER_VERSION=v18.11.2` (was empty → `latest`); `latest` is dangerous as a default because `docker compose pull` can silently bring a major-version migration. Users still override freely.
+- `docker-compose.yml`: runner config switched from external named volume `gitlab-runner-config` to bind-mount `./gitlab-runner-config:/etc/gitlab-runner` — registration `config.toml` is now inspectable/editable from the host without entering the container; removes the one-shot `docker volume create` prerequisite.
+- `docker-compose.yml`: `prometheus_monitoring['enable']` now reads `${GITLAB_PROMETHEUS_ENABLED:-false}` (was hard-coded `true`).
+
+### Migration notes for existing users
+
+If you ran `1.1.0` with the named volume, copy the existing config to the new
+bind-mount path before recreating the runner:
+
+```bash
+docker run --rm -v gitlab-runner-config:/src -v "$PWD/gitlab-runner-config":/dst alpine \
+  sh -c 'cp -a /src/. /dst/'
+docker compose up -d
+docker volume rm gitlab-runner-config   # optional, once you've verified the new mount
+```
+
+---
+
 ## [1.1.0] - 2026-05-07
 
 ### Added
