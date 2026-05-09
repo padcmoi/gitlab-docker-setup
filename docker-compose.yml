@@ -35,7 +35,7 @@ services:
         # Performances (facultatif si petit serveur)
         puma['worker_processes'] = 1
         sidekiq['max_concurrency'] = 5
-        prometheus_monitoring['enable'] = true
+        prometheus_monitoring['enable'] = ${GITLAB_PROMETHEUS_ENABLED:-false}
 
         # Réduction des logs GitLab
         gitlab_rails['log_level'] = :warn
@@ -70,7 +70,7 @@ services:
         condition: service_healthy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - gitlab-runner-config:/etc/gitlab-runner
+      - ./gitlab-runner-config:/etc/gitlab-runner
       - ./runner-ssh:/root/.ssh
     environment:
       CI_SERVER_URL: "https://${GITLAB_HOST}"
@@ -142,11 +142,3 @@ services:
       options:
         max-size: "20M"
         max-file: "3"
-
-volumes:
-  # External volume (must be created before first start with:
-  #   docker volume create gitlab-runner-config
-  # Persists the runner registration (config.toml) across container
-  # recreates / `docker compose down -v`. Documented in README.
-  gitlab-runner-config:
-    external: true

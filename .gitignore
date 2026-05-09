@@ -4,3 +4,4 @@ runner-ssh/
 data/
 logs/
 config/
+gitlab-runner-config/
