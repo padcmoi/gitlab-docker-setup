@@ -142,3 +142,72 @@ services:
       options:
         max-size: "20M"
         max-file: "3"
+
+  # Team commit dashboard (Nuxt 4 + Nuxt UI + ApexCharts).
+  # Reads the GitLab API and serves charts at 127.0.0.1:${STATS_PORT}.
+  # See ./gitlab-stats-nuxt/README.md and docs/en/STATS.md.
+  gitlab-stats:
+    container_name: "${GITLAB_CONTAINER_NAME}_stats"
+    build:
+      context: ./gitlab-stats-nuxt
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      gitlab:
+        condition: service_healthy
+    # host-gateway lets the container resolve ${GITLAB_HOST} to the host's
+    # reverse proxy, avoiding hairpin-NAT issues when calling the GitLab API.
+    extra_hosts:
+      - "${GITLAB_HOST}:host-gateway"
+    environment:
+      STATS_GITLAB_BASE_URL: "https://${GITLAB_HOST}"
+      STATS_GITLAB_TOKEN: "${STATS_GITLAB_TOKEN}"
+      STATS_OAUTH_CLIENT_ID: "${STATS_OAUTH_CLIENT_ID}"
+      STATS_OAUTH_CLIENT_SECRET: "${STATS_OAUTH_CLIENT_SECRET}"
+      STATS_OAUTH_REDIRECT_URL: "${STATS_OAUTH_REDIRECT_URL}"
+      STATS_SESSION_SECRET: "${STATS_SESSION_SECRET}"
+      NUXT_SESSION_PASSWORD: "${STATS_SESSION_SECRET}"
+      STATS_SINCE: "${STATS_SINCE:-2025-01-01T00:00:00Z}"
+      STATS_CACHE_TTL_MS: "${STATS_CACHE_TTL_MS:-900000}"
+      NODE_ENV: "production"
+    ports:
+      - "127.0.0.1:${STATS_PORT:-52081}:3000"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20M"
+        max-file: "3"
+
+  # On-demand tooling container for gitlab-stats-nuxt (format, install, lint…).
+  # NOT started by default — invoke explicitly:
+  #   docker compose --profile tools run --rm gitlab-stats-tools pnpm install
+  #   docker compose --profile tools run --rm gitlab-stats-tools pnpm format
+  # Source code is bind-mounted read-write, but node_modules / .nuxt / pnpm
+  # store live in named Docker volumes so the host filesystem stays clean.
+  gitlab-stats-tools:
+    image: node:22-alpine
+    profiles: ["tools"]
+    working_dir: /app
+    volumes:
+      - ./gitlab-stats-nuxt:/app
+      - gitlab-stats-nuxt-node-modules:/app/node_modules
+      - gitlab-stats-nuxt-nuxt-cache:/app/.nuxt
+      - gitlab-stats-nuxt-output:/app/.output
+      - gitlab-stats-nuxt-pnpm-store:/root/.local/share/pnpm
+    environment:
+      PNPM_HOME: /root/.local/share/pnpm
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        corepack enable && corepack prepare pnpm@9.15.0 --activate
+        exec "$$@"
+      - --
+
+volumes:
+  # Named volumes for the gitlab-stats-nuxt tooling container (see above).
+  # The host filesystem never sees node_modules / .nuxt / pnpm store.
+  gitlab-stats-nuxt-node-modules:
+  gitlab-stats-nuxt-nuxt-cache:
+  gitlab-stats-nuxt-output:
+  gitlab-stats-nuxt-pnpm-store:

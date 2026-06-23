@@ -2,6 +2,29 @@
 
 This file follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- **`gitlab-stats-nuxt/`** — optional Nuxt 4 dashboard ("GitLab Stats") that visualises team commit activity on every project the admin token can see. OAuth GitLab login (`read_user` scope), server-side API calls with a `read_api` token, in-memory cache (15 min TTL), and 10+ ApexCharts (per-day / per-week / per-month / per-hour UTC / per-day-of-week, all multi-developer stacked with legend; plus per-project, per-developer, per-type donut, additions/deletions lines, last-commits table with clickable project + commit links).
+- `docker-compose.yml`: new `gitlab-stats` service exposed at `127.0.0.1:${STATS_PORT:-52081}`, plus on-demand `gitlab-stats-tools` profile (named Docker volumes for `node_modules` / `.nuxt` / `.output` / pnpm store — host filesystem stays clean).
+- `.env.sample`: new `STATS_*` block (`STATS_PORT`, `STATS_GITLAB_TOKEN`, `STATS_OAUTH_CLIENT_ID`, `STATS_OAUTH_CLIENT_SECRET`, `STATS_OAUTH_REDIRECT_URL`, `STATS_SESSION_SECRET`, `STATS_SINCE`, `STATS_CACHE_TTL_MS`).
+- `docs/en/STATS.md` and `docs/fr/STATS.md`: dedicated install + usage walkthrough (OAuth app, server PAT, session secret, reverse-proxy snippet, first-launch checklist).
+- `.gitignore`: ignore `gitlab-stats-nuxt/{node_modules,.nuxt,.output}` so the host build tooling never pollutes the working tree.
+
+### Notes for existing users
+
+The new `gitlab-stats` service is **fully optional** — leave the `STATS_*` env vars empty (or remove them) and run `docker compose up -d` as usual; only `gitlab` and `gitlab-runner` start.
+
+To deploy the dashboard without touching your running GitLab:
+
+```bash
+docker compose build gitlab-stats
+docker compose up -d --no-deps gitlab-stats
+```
+
+`--no-deps` guarantees the existing `gitlab` and `gitlab-runner` containers are not recreated.
+
 ## [1.2.0] - 2026-05-09
 
 ### Added

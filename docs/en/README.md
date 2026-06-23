@@ -21,6 +21,7 @@ _🇬🇧 English version | [🇫🇷 Version française](../fr/README.md)_
 - [Reverse proxy](#-reverse-proxy)
 - [SSL / Let's Encrypt](#-ssl--lets-encrypt)
 - [CI/CD — SSH deploys](#-cicd--ssh-deploys)
+- [Stats dashboard (optional)](#-stats-dashboard-optional)
 - [Useful commands](#%EF%B8%8F-useful-commands)
 - [Backup & restore](#-backup--restore)
 - [Security checklist](#-security-checklist)
@@ -43,6 +44,10 @@ _🇬🇧 English version | [🇫🇷 Version française](../fr/README.md)_
   terminated at the reverse proxy.
 - **Production-leaning defaults** — log rotation, healthcheck, optional
   image pinning.
+- **Optional Stats dashboard** — a Nuxt 4 + Nuxt UI + ApexCharts dashboard
+  to visualise team commit activity (per-day / week / month / hour / by
+  developer / by project / by type). OAuth-protected. See
+  [STATS.md](STATS.md).
 
 ---
 
@@ -221,6 +226,39 @@ template ships a battle-tested SSH-deploy workflow:
   via SSH.
 
 **Full guide: [CI/CD (EN)](CI.md) / [CI/CD (FR)](../fr/CI.md).**
+
+---
+
+## 📊 Stats dashboard (optional)
+
+An optional **Nuxt 4 + Nuxt UI 4 + ApexCharts** dashboard that visualises
+team commit activity across every project visible to a server-side admin
+token. Visitors log in via **OAuth GitLab** so the URL is safe to share
+with your team or your manager.
+
+Highlights:
+
+- Filters: period (7d / 30d / 90d / 6 months / 1 year / all), project,
+  multi-developer.
+- Stacked charts per developer (top 10 + "Autres"): by day, ISO week,
+  month, hour (UTC), day of week.
+- KPIs, top-15 projects, top-15 developers, commit-type donut,
+  additions/deletions per month, last-commits table.
+- In-memory cache (15 min default), manual refresh, clickable project
+  and commit links.
+
+Quick deploy (only after the GitLab service is healthy):
+
+```bash
+docker compose build gitlab-stats
+docker compose up -d --no-deps gitlab-stats
+```
+
+`--no-deps` guarantees the running `gitlab` and `gitlab-runner` are never
+recreated. Leave `STATS_*` empty in `.env` to skip the dashboard
+entirely.
+
+**Full setup guide: [STATS.md (EN)](STATS.md) / [STATS.md (FR)](../fr/STATS.md).**
 
 ---
 

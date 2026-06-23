@@ -21,6 +21,43 @@ For the full CI/CD + SSH-deploy walkthrough:
 - 🇬🇧 [CI/CD guide (EN)](docs/en/CI.md)
 - 🇫🇷 [Guide CI/CD (FR)](docs/fr/CI.md)
 
+For the optional **GitLab Stats dashboard** (Nuxt 4 team commit activity, OAuth-protected):
+
+- 🇬🇧 [Stats dashboard (EN)](docs/en/STATS.md)
+- 🇫🇷 [Dashboard Stats (FR)](docs/fr/STATS.md)
+
+## 📊 Optional: GitLab Stats dashboard
+
+A small **Nuxt 4 + Nuxt UI + ApexCharts** dashboard ships in
+[`gitlab-stats-nuxt/`](gitlab-stats-nuxt/) to visualise development activity
+(commits, lines, types, by developer) across every project visible to a
+server-side admin token. Visitors log in via **OAuth GitLab** so the link can
+safely be shared with the team / your manager. Read-only by design — only
+`read_api` on the token and `read_user` on the OAuth scope.
+
+Highlights:
+
+- Filters: period (7d / 30d / 90d / 6 months / 1 year / all), project,
+  multi-developer selector.
+- Multi-developer **stacked charts with legend** (top 10 + "Autres"): by day,
+  by ISO week, by month, by hour (UTC), by day of week.
+- Donut for commit types, top-15 by project, top-15 by developer,
+  additions/deletions per month.
+- KPIs: projects, commits, active days, average per active day, lines
+  added / removed / changed.
+- In-memory cache with manual refresh, clickable project + commit links.
+
+The service is **fully optional** — leave `STATS_*` empty in `.env` and only
+GitLab + Runner start. To deploy it later, follow
+[docs/en/STATS.md](docs/en/STATS.md) (or [FR](docs/fr/STATS.md)) and run:
+
+```bash
+docker compose build gitlab-stats
+docker compose up -d --no-deps gitlab-stats
+```
+
+`--no-deps` guarantees your running GitLab and Runner are never recreated.
+
 ## 🧹 Optional: Auto-clean unused Docker volumes
 
 CI jobs that run Docker Compose tests can leave unused volumes behind

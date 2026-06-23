@@ -5,3 +5,8 @@ data/
 logs/
 config/
 gitlab-runner-config/
+
+# gitlab-stats-nuxt build artefacts (only the source belongs in git)
+gitlab-stats-nuxt/node_modules/
+gitlab-stats-nuxt/.nuxt/
+gitlab-stats-nuxt/.output/

@@ -21,6 +21,7 @@ _[🇬🇧 English version](../en/README.md) | 🇫🇷 Version française_
 - [Reverse proxy](#-reverse-proxy)
 - [SSL / Let's Encrypt](#-ssl--lets-encrypt)
 - [CI/CD — déploiements SSH](#-cicd--déploiements-ssh)
+- [Dashboard Stats (optionnel)](#-dashboard-stats-optionnel)
 - [Commandes utiles](#%EF%B8%8F-commandes-utiles)
 - [Backup & restore](#-backup--restore)
 - [Checklist sécurité](#-checklist-sécurité)
@@ -43,6 +44,10 @@ _[🇬🇧 English version](../en/README.md) | 🇫🇷 Version française_
   terminés au reverse proxy.
 - **Defaults orientés production** — rotation de logs, healthcheck,
   pinning d'image optionnel.
+- **Dashboard Stats optionnel** — un dashboard Nuxt 4 + Nuxt UI + ApexCharts
+  pour visualiser l'activité de commits de l'équipe (par jour / semaine /
+  mois / heure / dev / projet / type). Protégé par OAuth. Voir
+  [STATS.md](STATS.md).
 
 ---
 
@@ -221,6 +226,39 @@ template fournit un workflow SSH-deploy éprouvé :
 - Un `.gitlab-ci.yml` réutilisable décode la clé au job et déploie en SSH.
 
 **Guide complet : [CI/CD (FR)](CI.md) / [CI/CD (EN)](../en/CI.md).**
+
+---
+
+## 📊 Dashboard Stats (optionnel)
+
+Un dashboard optionnel **Nuxt 4 + Nuxt UI 4 + ApexCharts** qui visualise
+l'activité de commits de l'équipe sur tous les projets visibles par un
+token serveur admin. Les visiteurs se connectent via **OAuth GitLab** — le
+lien peut donc être partagé avec ton équipe ou ton patron.
+
+Points clés :
+
+- Filtres : période (7j / 30j / 90j / 6 mois / 1 an / tout), projet,
+  multi-développeur.
+- Charts empilés par développeur (top 10 + "Autres") : par jour, semaine
+  ISO, mois, heure (UTC), jour de la semaine.
+- KPIs, top-15 projets, top-15 développeurs, donut des types de commits,
+  ajouts/suppressions par mois, tableau des derniers commits.
+- Cache mémoire (15 min par défaut), rafraîchissement manuel, liens
+  cliquables vers projet et commit.
+
+Déploiement rapide (uniquement quand le service GitLab est healthy) :
+
+```bash
+docker compose build gitlab-stats
+docker compose up -d --no-deps gitlab-stats
+```
+
+`--no-deps` garantit que les conteneurs `gitlab` et `gitlab-runner` en
+cours d'exécution ne sont jamais recréés. Laisse `STATS_*` vide dans
+`.env` pour ne pas activer le dashboard du tout.
+
+**Guide complet : [STATS.md (FR)](STATS.md) / [STATS.md (EN)](../en/STATS.md).**
 
 ---
 
